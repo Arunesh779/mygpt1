@@ -257,7 +257,10 @@ async def chat(request: ChatRequest):
 
     async def generate():
         try:
-            response = await client.aio.models.generate_content(
+            # Stream Gemini output as it is generated instead of waiting
+            # for the complete answer before sending anything to the frontend.
+            response_parts = []
+            stream = await client.aio.models.generate_content_stream(
                 model=GEMINI_MODEL,
                 contents=contents,
                 config=types.GenerateContentConfig(
@@ -266,11 +269,13 @@ async def chat(request: ChatRequest):
                 ),
             )
 
-            answer = response.text or ""
+            async for chunk in stream:
+                text_part = chunk.text or ""
+                if text_part:
+                    response_parts.append(text_part)
+                    yield ndjson({"token": text_part})
 
-            if answer:
-                yield ndjson({"token": answer})
-            else:
+            if not response_parts:
                 logger.warning(
                     "Gemini returned an empty answer for model %s",
                     GEMINI_MODEL,
