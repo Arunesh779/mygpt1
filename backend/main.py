@@ -2,7 +2,10 @@
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from typing import Any
+
+import asyncpg
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +28,7 @@ logger = logging.getLogger("mygpt")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 client = (
     genai.Client(api_key=GEMINI_API_KEY)
@@ -32,7 +36,41 @@ client = (
     else None
 )
 
-app = FastAPI(title=APP_NAME, version="3.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create and close the PostgreSQL connection pool with the app lifecycle."""
+    if not DATABASE_URL:
+        logger.warning(
+            "DATABASE_URL is not configured; PostgreSQL features will be unavailable."
+        )
+        app.state.db_pool = None
+        yield
+        return
+
+    try:
+        app.state.db_pool = await asyncpg.create_pool(
+            dsn=DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            command_timeout=30,
+        )
+        # Verify that the database is reachable during startup.
+        async with app.state.db_pool.acquire() as connection:
+            await connection.fetchval("SELECT 1")
+        logger.info("PostgreSQL connection pool initialized successfully.")
+    except Exception:
+        logger.exception("Could not initialize PostgreSQL connection pool.")
+        raise
+
+    try:
+        yield
+    finally:
+        if app.state.db_pool is not None:
+            await app.state.db_pool.close()
+            logger.info("PostgreSQL connection pool closed.")
+
+
+app = FastAPI(title=APP_NAME, version="3.1.0", lifespan=lifespan)
 
 
 # --------------------------------------------------
@@ -213,6 +251,33 @@ async def root():
         "provider": "Google Gemini",
         "model": GEMINI_MODEL,
     }
+
+
+@app.get("/db-health")
+async def db_health():
+    """Check whether the backend can execute a simple PostgreSQL query."""
+    pool = getattr(app.state, "db_pool", None)
+
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL is not configured. Check DATABASE_URL in Render.",
+        )
+
+    try:
+        async with pool.acquire() as connection:
+            result = await connection.fetchval("SELECT 1")
+
+        return {
+            "status": "connected",
+            "database_test": result,
+        }
+    except Exception:
+        logger.exception("PostgreSQL health check failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection failed. Check Render logs.",
+        )
 
 
 @app.get("/health")
