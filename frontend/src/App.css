@@ -231,3 +231,448 @@ body { min-width: 320px; }
   .messages-list { padding: 0 14px 18px; }
   .welcome-state { min-height: 0; }
 }
+.app {
+  position: relative;
+  isolation: isolate;
+}
+
+.floating-hearts {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.floating-heart {
+  position: absolute;
+  bottom: -45px;
+  display: block;
+  color: #ff80b4;
+  opacity: 0;
+  line-height: 1;
+  user-select: none;
+  text-shadow: 0 0 14px #ff80b426;
+  animation: mygpt-float-heart 18s linear infinite;
+  will-change: transform, opacity;
+}
+
+.floating-heart.heart-0 { color: #ff80b4; }
+.floating-heart.heart-1 { color: #ffc2dc; }
+.floating-heart.heart-2 { color: #d9b4ff; }
+.floating-heart.heart-3 { color: #ff9ec8; }
+.floating-heart.heart-4 { color: #ffe0ee; }
+.floating-heart.heart-5 { color: #d9a6e9; }
+
+@keyframes mygpt-float-heart {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(-12deg);
+    opacity: 0;
+  }
+
+  15% {
+    opacity: 0.15;
+  }
+
+  50% {
+    transform: translate3d(18px, -50vh, 0) rotate(12deg);
+    opacity: 0.09;
+  }
+
+  80% {
+    opacity: 0.13;
+  }
+
+  100% {
+    transform: translate3d(-16px, -105vh, 0) rotate(-8deg);
+    opacity: 0;
+  }
+}
+
+/* Keep app content above the decorative background */
+.app > .floating-hearts {
+  z-index: 0;
+}
+
+.app > .sidebar,
+.app > .main-panel {
+  z-index: 1;
+}
+
+/* ===== ADD-ON: CHATGPT-STYLE ANSWER FORMATTING ===== */
+
+/* Remove the assistant's large colored bubble without changing user bubbles */
+.message-row.assistant-row .assistant-bubble {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 0 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* More comfortable reading and line spacing */
+.message-row.assistant-row .message-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.85;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content p {
+  margin: 0 0 15px;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  font-family: 'Manrope', sans-serif;
+  color: var(--text);
+  line-height: 1.4;
+  font-weight: 700;
+  margin: 23px 0 10px;
+}
+
+.markdown-content h1 { font-size: 1.5em; }
+.markdown-content h2 { font-size: 1.3em; }
+.markdown-content h3 { font-size: 1.12em; }
+.markdown-content h4 { font-size: 1em; }
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 8px 0 18px;
+  padding-left: 26px;
+}
+
+.markdown-content li {
+  padding-left: 4px;
+  margin: 5px 0;
+}
+
+.markdown-content li p {
+  margin-bottom: 5px;
+}
+
+.markdown-content strong {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.markdown-content blockquote {
+  margin: 16px 0;
+  padding: 4px 0 4px 15px;
+  border-left: 3px solid var(--pink);
+  color: var(--muted);
+}
+
+.markdown-content a {
+  color: var(--pink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.markdown-content hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 22px 0;
+}
+
+.markdown-content :not(pre) > code {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--panel-hover);
+  font-family: Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.markdown-content pre {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 14px 0 20px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #191722;
+  color: #f8f3fb;
+  line-height: 1.65;
+}
+
+.markdown-content pre code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  white-space: pre;
+}
+
+.markdown-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 14px 0 20px;
+}
+
+.markdown-content th,
+.markdown-content td {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.markdown-content th {
+  background: var(--panel-soft);
+  font-weight: 700;
+}
+
+@media (max-width: 680px) {
+  .message-row.assistant-row .message-text {
+    font-size: 14px;
+    line-height: 1.8;
+  }
+
+  .markdown-content pre {
+    padding: 11px;
+  }
+
+  .floating-heart {
+    text-shadow: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .floating-heart {
+    animation: none;
+    opacity: 0.06;
+  }
+}
+
+/* FIX: Make the animated hearts visible behind the chat */
+.app {
+  position: relative;
+  isolation: isolate;
+  background: var(--bg);
+}
+
+.app > .floating-hearts {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.app > .sidebar,
+.app > .main-panel {
+  position: relative;
+  z-index: 1;
+}
+
+/* Important: let the hearts show through the main panel */
+.app > .main-panel {
+  background: transparent;
+}
+
+.floating-heart {
+  position: absolute;
+  bottom: -45px;
+  display: block;
+  color: #ff80b4;
+  opacity: 0;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  text-shadow: 0 0 14px #ff80b426;
+  animation: mygpt-float-heart 18s linear infinite;
+  will-change: transform, opacity;
+}
+
+.floating-heart.heart-0 { color: #ff80b4; }
+.floating-heart.heart-1 { color: #ffc2dc; }
+.floating-heart.heart-2 { color: #d9b4ff; }
+.floating-heart.heart-3 { color: #ff9ec8; }
+.floating-heart.heart-4 { color: #ffe0ee; }
+.floating-heart.heart-5 { color: #d9a6e9; }
+
+@keyframes mygpt-float-heart {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(-12deg);
+    opacity: 0;
+  }
+  15% { opacity: 0.15; }
+  50% {
+    transform: translate3d(18px, -50vh, 0) rotate(12deg);
+    opacity: 0.09;
+  }
+  80% { opacity: 0.13; }
+  100% {
+    transform: translate3d(-16px, -105vh, 0) rotate(-8deg);
+    opacity: 0;
+  }
+}
+
+/* ===== ChatGPT-style assistant response fix ===== */
+
+/* Make sure assistant response text is visible */
+.assistant-bubble,
+.assistant-bubble .message-text,
+.assistant-bubble .markdown-content {
+  color: var(--text, #f3f4f6);
+  opacity: 1;
+  visibility: visible;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-height: 1.7;
+  text-align: left;
+}
+
+/* Paragraphs */
+.markdown-content p {
+  margin: 0 0 12px;
+  line-height: 1.75;
+}
+
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+/* Headings */
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  color: inherit;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 20px 0 10px;
+}
+
+.markdown-content h1 {
+  font-size: 1.5rem;
+}
+
+.markdown-content h2 {
+  font-size: 1.3rem;
+}
+
+.markdown-content h3,
+.markdown-content h4 {
+  font-size: 1.1rem;
+}
+
+/* Lists */
+.markdown-content ul,
+.markdown-content ol {
+  margin: 8px 0 14px;
+  padding-left: 26px;
+}
+
+.markdown-content li {
+  margin: 5px 0;
+  padding-left: 3px;
+}
+
+.markdown-content li > p {
+  margin-bottom: 5px;
+}
+
+/* Bold text and links */
+.markdown-content strong {
+  font-weight: 700;
+  color: inherit;
+}
+
+.markdown-content a {
+  color: #8ab4ff;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+/* Inline code */
+.markdown-content :not(pre) > code {
+  background: rgba(128, 128, 128, 0.18);
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 5px;
+  padding: 2px 5px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 0.9em;
+}
+
+/* Code blocks */
+.markdown-content pre {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  padding: 14px;
+  margin: 12px 0;
+  border-radius: 10px;
+  background: #171717;
+  color: #f5f5f5;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.markdown-content pre code {
+  color: inherit;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+/* Tables */
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  display: block;
+  overflow-x: auto;
+}
+
+.markdown-content th,
+.markdown-content td {
+  padding: 9px 12px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  text-align: left;
+}
+
+.markdown-content th {
+  font-weight: 700;
+  background: rgba(128, 128, 128, 0.15);
+}
+
+/* Quotes and separators */
+.markdown-content blockquote {
+  margin: 12px 0;
+  padding: 4px 0 4px 14px;
+  border-left: 3px solid #8b8bff;
+  opacity: 0.95;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid rgba(128, 128, 128, 0.35);
+  margin: 18px 0;
+}
+
+/* Images and long responses */
+.markdown-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.markdown-content > *:first-child {
+  margin-top: 0;
+}
