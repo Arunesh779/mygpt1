@@ -676,3 +676,129 @@ body { min-width: 320px; }
 .markdown-content > *:first-child {
   margin-top: 0;
 }
+
+/* ===== Mobile visibility and layout fix ===== */
+@media screen and (max-width: 680px) {
+  html,
+  body,
+  #root {
+    width: 100%;
+    min-width: 320px;
+    min-height: 100%;
+    margin: 0;
+  }
+
+  .app {
+    display: flex !important;
+    flex-direction: row;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+    isolation: isolate;
+  }
+
+  .floating-hearts {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .main-panel {
+    position: relative;
+    z-index: 1;
+    display: flex !important;
+    flex: 1 1 100%;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    background: transparent !important;
+  }
+
+  .topbar {
+    display: flex !important;
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 58px;
+    padding: 0 12px;
+  }
+
+  .menu-button {
+    display: inline-grid !important;
+  }
+
+  .chat-area {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .welcome-state {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 24px 16px;
+  }
+
+  .welcome-content {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .messages-list {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    padding: 12px 12px 18px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .message-row {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .message-bubble {
+    max-width: calc(100% - 40px);
+    min-width: 0;
+    font-size: 14px;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+  }
+
+  .composer-wrap {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 8px 10px max(10px, env(safe-area-inset-bottom));
+    z-index: 3;
+  }
+
+  .composer {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .composer textarea {
+    width: 100%;
+    min-width: 0;
+    font-size: 16px;
+  }
+
+  .privacy-note {
+    font-size: 10px;
+  }
+}
