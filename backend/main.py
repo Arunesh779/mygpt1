@@ -1,29 +1,43 @@
 
 import json
+import logging
 import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI, APIError, APIConnectionError, APITimeoutError
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 from pydantic import BaseModel, Field
+
+
+# --------------------------------------------------
+# Configuration and logging
+# --------------------------------------------------
 
 APP_NAME = "MyGPT"
 
-# Configure these in Render Environment.
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mygpt")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
 
-# Create the client only when a key is configured.
 client = (
-    AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=120.0)
-    if OPENAI_API_KEY
+    genai.Client(api_key=GEMINI_API_KEY)
+    if GEMINI_API_KEY
     else None
 )
 
-app = FastAPI(title=APP_NAME, version="2.0.0")
+app = FastAPI(title=APP_NAME, version="3.1.0")
+
+
+# --------------------------------------------------
+# CORS
+# --------------------------------------------------
 
 allowed_origins = [
     "http://localhost:5173",
@@ -42,6 +56,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+# --------------------------------------------------
+# MyGPT personality
+# --------------------------------------------------
 
 SYSTEM_PROMPT = """You are MyGPT, a warm, caring AI companion created by Arunesh for his girlfriend.
 
@@ -70,6 +89,10 @@ SAFETY AND HONESTY
 - Be supportive without suggesting that an AI replaces trusted people or real conversations.
 """
 
+
+# --------------------------------------------------
+# Request model and helpers
+# --------------------------------------------------
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=20000)
@@ -100,23 +123,79 @@ def ndjson(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False) + "\n"
 
 
+def get_error_status(exc: Exception) -> int | None:
+    """Extract an HTTP status code when the SDK provides one."""
+    status = getattr(exc, "code", None)
+
+    if status is None:
+        status = getattr(exc, "status_code", None)
+
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_error_message(exc: Exception) -> str:
+    """Classify provider errors without returning secrets to the browser."""
+    status = get_error_status(exc)
+    message = str(exc).lower()
+
+    if status == 429 or any(
+        text in message
+        for text in ("resource_exhausted", "quota exceeded", "rate limit")
+    ):
+        return (
+            "Gemini quota or rate limit reached. Check your Google AI Studio "
+            "quota, model limits, and retry later."
+        )
+
+    if status in (401, 403) or any(
+        text in message
+        for text in ("unauthorized", "permission_denied", "api key not valid")
+    ):
+        return (
+            "Gemini authentication or access failed. Check GEMINI_API_KEY, "
+            "project access, and model availability."
+        )
+
+    if status == 404 or "not_found" in message:
+        return (
+            "The configured Gemini model was not found or is unavailable. "
+            "Check GEMINI_MODEL in your environment settings."
+        )
+
+    if status is not None and status >= 500:
+        return "Gemini is temporarily unavailable. Please try again later."
+
+    return (
+        "Gemini request failed. Check the backend terminal or Render logs "
+        "for the detailed error."
+    )
+
+
+# --------------------------------------------------
+# Routes
+# --------------------------------------------------
+
 @app.get("/")
 async def root():
     return {
         "app": APP_NAME,
         "status": "running",
-        "provider": "OpenAI",
-        "model": OPENAI_MODEL,
+        "provider": "Google Gemini",
+        "model": GEMINI_MODEL,
     }
 
 
 @app.get("/health")
 async def health():
+    # Configuration check only; it does not send an API request.
     return {
         "status": "ok",
-        "provider": "OpenAI",
-        "api_key_configured": bool(OPENAI_API_KEY),
-        "model": OPENAI_MODEL,
+        "provider": "Google Gemini",
+        "api_key_configured": bool(GEMINI_API_KEY),
+        "model": GEMINI_MODEL,
     }
 
 
@@ -130,73 +209,74 @@ async def chat(request: ChatRequest):
             detail="Message cannot be empty.",
         )
 
-    if not OPENAI_API_KEY or client is None:
+    if client is None:
         raise HTTPException(
             status_code=503,
-            detail="OPENAI_API_KEY is not configured in Render.",
+            detail="GEMINI_API_KEY is not configured.",
         )
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(clean_history(request.history))
-    messages.append({"role": "user", "content": question})
+    contents = []
+
+    for item in clean_history(request.history):
+        contents.append({
+            "role": "model" if item["role"] == "assistant" else "user",
+            "parts": [{"text": item["content"]}],
+        })
+
+    contents.append({
+        "role": "user",
+        "parts": [{"text": question}],
+    })
 
     async def generate():
         try:
-            stream = await client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=messages,
-                stream=True,
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    max_output_tokens=1024,
+                ),
             )
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
+            answer = response.text or ""
 
-                token = chunk.choices[0].delta.content
+            if answer:
+                yield ndjson({"token": answer})
+            else:
+                logger.warning(
+                    "Gemini returned an empty answer for model %s",
+                    GEMINI_MODEL,
+                )
+                yield ndjson({
+                    "error": (
+                        "Gemini returned an empty response. "
+                        "Please try a different message."
+                    )
+                })
 
-                if token:
-                    yield ndjson({"token": token})
-
-            yield ndjson({"done": True})
-
-        except APITimeoutError:
-            yield ndjson({
-                "error": "OpenAI timed out. Please try again."
-            })
-            yield ndjson({"done": True})
-
-        except APIConnectionError:
-            yield ndjson({
-                "error": "Could not connect to the OpenAI API."
-            })
             yield ndjson({"done": True})
 
         except APIError as exc:
-            status_code = getattr(exc, "status_code", None)
+            # Log exception details locally/at the server.
+            # Never log the API key or request headers.
+            logger.exception(
+                "Gemini API error; status=%s, model=%s",
+                get_error_status(exc),
+                GEMINI_MODEL,
+            )
 
-            if status_code == 401:
-                detail = "OpenAI rejected the API key. Check OPENAI_API_KEY in Render."
-            elif status_code == 429:
-                detail = (
-                    "OpenAI API quota or rate limit reached. "
-                    "Check API billing, credits, and usage limits."
-                )
-            elif status_code == 403:
-                detail = (
-                    "OpenAI API access was denied. Check project permissions "
-                    "and model access."
-                )
-            else:
-                detail = f"OpenAI API error (HTTP {status_code or 'unknown'})."
-
-            yield ndjson({"error": detail})
+            yield ndjson({"error": safe_error_message(exc)})
             yield ndjson({"done": True})
 
-        except Exception:
-            # Avoid sending internal details or secrets to the browser.
-            yield ndjson({
-                "error": "An unexpected chat error occurred. Check Render logs."
-            })
+        except Exception as exc:
+            logger.exception(
+                "Unexpected Gemini request failure; type=%s, model=%s",
+                type(exc).__name__,
+                GEMINI_MODEL,
+            )
+
+            yield ndjson({"error": safe_error_message(exc)})
             yield ndjson({"done": True})
 
     return StreamingResponse(
