@@ -8,6 +8,34 @@ const API = "https://mygpt-tcnq.onrender.com";
 
 const CHATS_KEY = "mygpt_saved_chats_v1";
 const CURRENT_KEY = "mygpt_current_chat_v1";
+const USER_KEY = "mygpt_browser_user_v1";
+
+function getOrCreateUserId() {
+  let userId = localStorage.getItem(USER_KEY);
+  if (!userId) {
+    userId = `user-${makeId()}`;
+    localStorage.setItem(USER_KEY, userId);
+  }
+  return userId;
+}
+
+function toTimestamp(value) {
+  if (!value) return Date.now();
+  const parsed = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(toTimestamp(value));
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 const makeId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -73,6 +101,7 @@ function TypingMarkdown({ text, speed = 18 }) {
 
 export default function App() {
   const [chats, setChats] = useState(() => readChats());
+  const [userId] = useState(() => getOrCreateUserId());
   const [currentId, setCurrentId] = useState(
     () => localStorage.getItem(CURRENT_KEY) || ""
   );
@@ -96,6 +125,85 @@ export default function App() {
 
   const currentChat = chats.find((chat) => chat.id === currentId) || null;
   const messages = currentChat?.messages || [];
+
+  // PostgreSQL is the shared source of truth for this browser user's history.
+  const loadDatabaseChats = useCallback(async (preferredId = "") => {
+    const sessionsResponse = await fetch(
+      `${API}/sessions?user_id=${encodeURIComponent(userId)}`
+    );
+    if (!sessionsResponse.ok) {
+      throw new Error(`Could not load conversation history (${sessionsResponse.status}).`);
+    }
+
+    const sessionsData = await sessionsResponse.json();
+    const sessions = Array.isArray(sessionsData.sessions)
+      ? sessionsData.sessions
+      : [];
+
+    const databaseChats = await Promise.all(
+      sessions.map(async (session) => {
+        const messagesResponse = await fetch(
+          `${API}/sessions/${encodeURIComponent(session.session_id)}/messages?user_id=${encodeURIComponent(userId)}`
+        );
+        if (!messagesResponse.ok) {
+          throw new Error(`Could not load messages for ${session.session_name || "a conversation"}.`);
+        }
+
+        const messagesData = await messagesResponse.json();
+        const restoredMessages = [];
+
+        for (const row of messagesData.messages || []) {
+          restoredMessages.push({
+            id: `${row.message_id}-user`,
+            role: "user",
+            content: row.input || "",
+            timestamp: toTimestamp(row.input_time),
+          });
+
+          if (row.output !== null && row.output !== undefined && row.output !== "") {
+            restoredMessages.push({
+              id: `${row.message_id}-assistant`,
+              role: "assistant",
+              content: row.output,
+              timestamp: toTimestamp(row.output_time || row.input_time),
+            });
+          }
+        }
+
+        return {
+          id: session.session_id,
+          title: session.session_name || "New conversation",
+          updatedAt: toTimestamp(session.updated_at || session.created_at),
+          createdAt: toTimestamp(session.created_at),
+          messages: restoredMessages,
+        };
+      })
+    );
+
+    // Keep local drafts as a fallback, but prefer database records for matching IDs.
+    setChats((previous) => {
+      const databaseIds = new Set(databaseChats.map((chat) => chat.id));
+      const localOnly = previous.filter((chat) => !databaseIds.has(chat.id));
+      return [...databaseChats, ...localOnly].sort(
+        (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
+      );
+    });
+
+    const savedCurrentId = localStorage.getItem(CURRENT_KEY) || "";
+    const nextCurrentId =
+      databaseChats.find((chat) => chat.id === preferredId)?.id ||
+      databaseChats.find((chat) => chat.id === savedCurrentId)?.id ||
+      databaseChats[0]?.id;
+
+    if (nextCurrentId) setCurrentId(nextCurrentId);
+    return databaseChats;
+  }, [userId]);
+
+  useEffect(() => {
+    loadDatabaseChats().catch((err) => {
+      console.error("Could not restore MyGPT history from PostgreSQL:", err);
+    });
+  }, [loadDatabaseChats]);
 
   // Save chats locally.
   useEffect(() => {
@@ -178,18 +286,6 @@ export default function App() {
     shouldAutoScrollRef.current = true;
   };
 
-  const deleteChat = (event, chatId) => {
-    event.stopPropagation();
-
-    setChats((previous) =>
-      previous.filter((chat) => chat.id !== chatId)
-    );
-
-    if (currentId === chatId) {
-      setCurrentId("");
-      setError("");
-    }
-  };
 
   const sendMessage = async (text = input) => {
     const question = text.trim();
@@ -213,12 +309,14 @@ export default function App() {
       role: "user",
       content: question,
       id: makeId(),
+      timestamp: Date.now(),
     };
 
     const assistantMessage = {
       role: "assistant",
       content: "",
       id: makeId(),
+      timestamp: null,
     };
 
     const startingMessages = [
@@ -246,6 +344,9 @@ export default function App() {
         signal: controller.signal,
         body: JSON.stringify({
           message: question,
+          user_id: userId,
+          session_id: chatId,
+          session_name: titleFrom(question),
           history: previousMessages.map(({ role, content }) => ({
             role,
             content,
@@ -301,6 +402,7 @@ export default function App() {
             {
               ...assistantMessage,
               content: assistantText,
+              timestamp: assistantMessage.timestamp || Date.now(),
             },
           ];
 
@@ -341,11 +443,17 @@ export default function App() {
             {
               ...assistantMessage,
               content: fallback,
+              timestamp: Date.now(),
             },
           ],
           question
         );
       }
+
+      // Reload the persisted record after the backend finishes saving the response.
+      loadDatabaseChats(chatId).catch((err) => {
+        console.error("Chat replied, but history refresh failed:", err);
+      });
     } catch (err) {
       if (err.name !== "AbortError") {
         setError(
@@ -480,29 +588,15 @@ export default function App() {
               >
                 <span className="recent-chat-icon">◌</span>
 
-                <span className="recent-chat-title">
-                  {chat.title || "New conversation"}
+                <span className="recent-chat-title" style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {chat.title || "New conversation"}
+                  </span>
+                  <span style={{ fontSize: "0.7rem", opacity: 0.68, marginTop: 3 }}>
+                    {formatDateTime(chat.updatedAt)}
+                  </span>
                 </span>
 
-                <span
-                  className="delete-chat"
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Delete ${chat.title}`}
-                  onClick={(event) =>
-                    deleteChat(event, chat.id)
-                  }
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === "Enter" ||
-                      event.key === " "
-                    ) {
-                      deleteChat(event, chat.id);
-                    }
-                  }}
-                >
-                  ×
-                </span>
               </button>
             ))
           )}
@@ -673,6 +767,11 @@ export default function App() {
                         <i />
                       </span>
                     ) : null}
+                    {message.timestamp && (
+                      <div style={{ fontSize: "0.68rem", opacity: 0.65, marginTop: 6, textAlign: message.role === "user" ? "right" : "left" }}>
+                        {formatDateTime(message.timestamp)}
+                      </div>
+                    )}
                   </div>
 
                   {message.role === "user" && (
