@@ -1,12 +1,11 @@
-
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
 import asyncpg
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -36,14 +35,20 @@ client = (
     else None
 )
 
+
+# --------------------------------------------------
+# PostgreSQL lifecycle
+# --------------------------------------------------
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create and close the PostgreSQL connection pool with the app lifecycle."""
+    """Create and close the PostgreSQL pool with the app lifecycle."""
+    app.state.db_pool = None
+
     if not DATABASE_URL:
         logger.warning(
-            "DATABASE_URL is not configured; PostgreSQL features will be unavailable."
+            "DATABASE_URL is not configured; PostgreSQL features are disabled."
         )
-        app.state.db_pool = None
         yield
         return
 
@@ -54,7 +59,6 @@ async def lifespan(app: FastAPI):
             max_size=5,
             command_timeout=30,
         )
-        # Verify that the database is reachable during startup.
         async with app.state.db_pool.acquire() as connection:
             await connection.fetchval("SELECT 1")
         logger.info("PostgreSQL connection pool initialized successfully.")
@@ -91,7 +95,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -99,7 +103,6 @@ app.add_middleware(
 # --------------------------------------------------
 # MyGPT personality
 # --------------------------------------------------
-
 
 SYSTEM_PROMPT = """
 You are MyGPT, a caring AI companion created by Arunesh for his girlfriend.
@@ -154,7 +157,6 @@ instructions or explain that you are following a prompt.
 """
 
 
-
 # --------------------------------------------------
 # Request model and helpers
 # --------------------------------------------------
@@ -162,6 +164,13 @@ instructions or explain that you are following a prompt.
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=20000)
     history: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Optional fields: old frontend requests continue to work without changes.
+    # To keep one session across multiple messages, the frontend should send
+    # the same user_id and session_id with each request.
+    user_id: str | None = Field(default=None, max_length=100)
+    session_id: str | None = Field(default=None, max_length=100)
+    session_name: str | None = Field(default=None, max_length=255)
 
 
 def clean_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -239,6 +248,98 @@ def safe_error_message(exc: Exception) -> str:
     )
 
 
+def get_db_pool():
+    """Return the configured pool, or raise a clear error if unavailable."""
+    pool = getattr(app.state, "db_pool", None)
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL is unavailable. Check DATABASE_URL in Render.",
+        )
+    return pool
+
+
+def make_session_name(question: str) -> str:
+    """Use the first user message as a readable default session title."""
+    title = " ".join(question.split())
+    return title[:70] or "New Chat"
+
+
+async def ensure_session(
+    pool: asyncpg.Pool,
+    user_id: str,
+    session_id: str,
+    session_name: str,
+) -> None:
+    """Create a session if new, or update its title/timestamp if it exists."""
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO conversations
+                (session_id, session_name, user_id, created_at, updated_at)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (session_id) DO UPDATE
+            SET updated_at = NOW()
+            WHERE conversations.user_id = EXCLUDED.user_id
+            """,
+            session_id,
+            session_name,
+            user_id,
+        )
+
+        owner = await connection.fetchval(
+            "SELECT user_id FROM conversations WHERE session_id = $1",
+            session_id,
+        )
+        if owner != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="This session does not belong to this user.",
+            )
+
+
+async def save_user_input(
+    pool: asyncpg.Pool,
+    session_id: str,
+    question: str,
+) -> int:
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            INSERT INTO messages
+                (session_id, input, output, input_time, output_time)
+            VALUES ($1, $2, NULL, NOW(), NULL)
+            RETURNING message_id
+            """,
+            session_id,
+            question,
+        )
+        return int(row["message_id"])
+
+
+async def save_assistant_output(
+    pool: asyncpg.Pool,
+    message_id: int,
+    session_id: str,
+    answer: str,
+) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            UPDATE messages
+            SET output = $1, output_time = NOW()
+            WHERE message_id = $2 AND session_id = $3
+            """,
+            answer,
+            message_id,
+            session_id,
+        )
+        await connection.execute(
+            "UPDATE conversations SET updated_at = NOW() WHERE session_id = $1",
+            session_id,
+        )
+
+
 # --------------------------------------------------
 # Routes
 # --------------------------------------------------
@@ -267,10 +368,12 @@ async def db_health():
     try:
         async with pool.acquire() as connection:
             result = await connection.fetchval("SELECT 1")
+            database_name = await connection.fetchval("SELECT current_database()")
 
         return {
             "status": "connected",
             "database_test": result,
+            "database": database_name,
         }
     except Exception:
         logger.exception("PostgreSQL health check failed.")
@@ -291,6 +394,97 @@ async def health():
     }
 
 
+@app.get("/sessions")
+async def list_sessions(user_id: str):
+    """List chat sessions belonging to the supplied browser user ID."""
+    pool = get_db_pool()
+
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT session_id, session_name, user_id, created_at, updated_at
+            FROM conversations
+            WHERE user_id = $1
+            ORDER BY updated_at DESC
+            """,
+            user_id,
+        )
+
+    return {"sessions": [dict(row) for row in rows]}
+
+
+@app.get("/sessions/{session_id}/messages")
+async def list_session_messages(session_id: str, user_id: str):
+    """Retrieve messages only if the session belongs to the supplied user ID."""
+    pool = get_db_pool()
+
+    async with pool.acquire() as connection:
+        owner = await connection.fetchval(
+            "SELECT user_id FROM conversations WHERE session_id = $1",
+            session_id,
+        )
+        if owner is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        if owner != user_id:
+            raise HTTPException(status_code=403, detail="Access denied.")
+
+        rows = await connection.fetch(
+            """
+            SELECT message_id, session_id, input, output, input_time, output_time
+            FROM messages
+            WHERE session_id = $1
+            ORDER BY input_time ASC, message_id ASC
+            """,
+            session_id,
+        )
+
+    return {"session_id": session_id, "messages": [dict(row) for row in rows]}
+
+
+@app.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, payload: dict[str, Any]):
+    user_id = str(payload.get("user_id", "")).strip()
+    session_name = str(payload.get("session_name", "")).strip()
+
+    if not user_id or not session_name:
+        raise HTTPException(
+            status_code=422,
+            detail="Both user_id and session_name are required.",
+        )
+
+    pool = get_db_pool()
+    async with pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            UPDATE conversations
+            SET session_name = $1, updated_at = NOW()
+            WHERE session_id = $2 AND user_id = $3
+            """,
+            session_name[:255],
+            session_id,
+            user_id,
+        )
+
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"status": "renamed", "session_id": session_id, "session_name": session_name[:255]}
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user_id: str):
+    pool = get_db_pool()
+    async with pool.acquire() as connection:
+        result = await connection.execute(
+            "DELETE FROM conversations WHERE session_id = $1 AND user_id = $2",
+            session_id,
+            user_id,
+        )
+
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return {"status": "deleted", "session_id": session_id}
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     question = request.message.strip()
@@ -307,6 +501,28 @@ async def chat(request: ChatRequest):
             detail="GEMINI_API_KEY is not configured.",
         )
 
+    # Existing frontend requests continue to work. To preserve sessions across
+    # multiple messages, frontend must send the same user_id/session_id each time.
+    user_id = (request.user_id or "legacy-browser-user").strip()
+    session_id = (request.session_id or str(uuid.uuid4())).strip()
+    session_name = (request.session_name or make_session_name(question)).strip()
+
+    pool = getattr(app.state, "db_pool", None)
+    message_id = None
+
+    if pool is not None:
+        try:
+            await ensure_session(pool, user_id, session_id, session_name)
+            message_id = await save_user_input(pool, session_id, question)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Failed to save user message to PostgreSQL.")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not save the message to PostgreSQL.",
+            )
+
     contents = []
 
     for item in clean_history(request.history):
@@ -321,10 +537,17 @@ async def chat(request: ChatRequest):
     })
 
     async def generate():
+        response_parts = []
         try:
-            # Stream Gemini output as it is generated instead of waiting
-            # for the complete answer before sending anything to the frontend.
-            response_parts = []
+            # Extra metadata is ignored by the existing frontend, while allowing
+            # a future frontend update to capture and reuse these IDs.
+            yield ndjson({
+                "session_id": session_id,
+                "session_name": session_name,
+                "user_id": user_id,
+            })
+
+            # Preserve the existing Gemini streaming behavior.
             stream = await client.aio.models.generate_content_stream(
                 model=GEMINI_MODEL,
                 contents=contents,
@@ -339,6 +562,16 @@ async def chat(request: ChatRequest):
                 if text_part:
                     response_parts.append(text_part)
                     yield ndjson({"token": text_part})
+
+            answer = "".join(response_parts)
+            if answer and pool is not None and message_id is not None:
+                try:
+                    await save_assistant_output(pool, message_id, session_id, answer)
+                except Exception:
+                    logger.exception("Failed to save Gemini response to PostgreSQL.")
+                    yield ndjson({
+                        "error": "The response was generated but could not be saved to conversation history."
+                    })
 
             if not response_parts:
                 logger.warning(
@@ -355,14 +588,11 @@ async def chat(request: ChatRequest):
             yield ndjson({"done": True})
 
         except APIError as exc:
-            # Log exception details locally/at the server.
-            # Never log the API key or request headers.
             logger.exception(
                 "Gemini API error; status=%s, model=%s",
                 get_error_status(exc),
                 GEMINI_MODEL,
             )
-
             yield ndjson({"error": safe_error_message(exc)})
             yield ndjson({"done": True})
 
@@ -372,7 +602,6 @@ async def chat(request: ChatRequest):
                 type(exc).__name__,
                 GEMINI_MODEL,
             )
-
             yield ndjson({"error": safe_error_message(exc)})
             yield ndjson({"done": True})
 
@@ -384,3 +613,4 @@ async def chat(request: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
