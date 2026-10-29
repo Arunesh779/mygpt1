@@ -960,7 +960,7 @@ export default function App() {
           </form>
 
           <p className="privacy-note">
-            MyGPT is Your GPT.
+            I LOVE YOU💗.
           </p>
         </footer>
       </main>
