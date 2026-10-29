@@ -106,6 +106,7 @@ export default function App() {
     () => localStorage.getItem(CURRENT_KEY) || ""
   );
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(true);
@@ -114,6 +115,7 @@ export default function App() {
   const messagesContainerRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
   const abortRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const sortedChats = useMemo(
     () =>
@@ -157,6 +159,7 @@ export default function App() {
             id: `${row.message_id}-user`,
             role: "user",
             content: row.input || "",
+            attachments: Array.isArray(row.attachments) ? row.attachments : [],
             timestamp: toTimestamp(row.input_time),
           });
 
@@ -207,7 +210,19 @@ export default function App() {
 
   // Save chats locally.
   useEffect(() => {
-    localStorage.setItem(CHATS_KEY, JSON.stringify(chats));
+    // Keep attachment bytes out of localStorage to avoid exhausting browser storage.
+    const cacheSafeChats = chats.map((chat) => ({
+      ...chat,
+      messages: (chat.messages || []).map((message) => ({
+        ...message,
+        attachments: (message.attachments || []).map(({ id, name, mime_type, size }) => ({ id, name, mime_type, size })),
+      })),
+    }));
+    try {
+      localStorage.setItem(CHATS_KEY, JSON.stringify(cacheSafeChats));
+    } catch (err) {
+      console.warn("MyGPT could not update the local conversation cache:", err);
+    }
   }, [chats]);
 
   // Remember the currently selected chat.
@@ -269,6 +284,7 @@ export default function App() {
 
     setCurrentId(makeId());
     setInput("");
+    setAttachments([]);
     setError("");
     setSidebarOpen(false);
     shouldAutoScrollRef.current = true;
@@ -287,10 +303,64 @@ export default function App() {
   };
 
 
+  const MAX_FILE_SIZE = 10 * 1024 * 1024;
+  const ACCEPTED_TYPES = new Set([
+    "image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf",
+    "text/plain", "text/markdown", "text/csv", "application/json",
+    "text/x-python", "text/javascript", "text/html", "text/css",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ]);
+
+  const handleFileSelection = async (event) => {
+    const selected = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!selected.length) return;
+    if (attachments.length + selected.length > 5) {
+      setError("Attach up to 5 files per message.");
+      return;
+    }
+    const next = [];
+    for (const file of selected) {
+      if (file.size > MAX_FILE_SIZE) {
+        setError(`${file.name} is larger than 10 MB.`);
+        continue;
+      }
+      if (!ACCEPTED_TYPES.has(file.type)) {
+        setError(`Unsupported file type: ${file.name}. Choose an image, PDF, text/code file, CSV, DOCX, or PPTX.`);
+        continue;
+      }
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+        reader.readAsDataURL(file);
+      }).catch((err) => {
+        setError(err.message);
+        return null;
+      });
+      if (!dataUrl) continue;
+      next.push({
+        id: makeId(), name: file.name, mime_type: file.type,
+        size: file.size, data_url: dataUrl,
+        data: String(dataUrl).split(",")[1] || "",
+      });
+    }
+    if (next.length) {
+      setAttachments((previous) => [...previous, ...next]);
+      setError("");
+    }
+  };
+
+  const removeAttachment = (id) => {
+    setAttachments((previous) => previous.filter((item) => item.id !== id));
+  };
+
   const sendMessage = async (text = input) => {
     const question = text.trim();
+    const filesToSend = attachments;
 
-    if (!question || loading) return;
+    if ((!question && !filesToSend.length) || loading) return;
 
     let chatId = currentId;
 
@@ -308,6 +378,7 @@ export default function App() {
     const userMessage = {
       role: "user",
       content: question,
+      attachments: filesToSend.map(({ id, name, mime_type, size, data_url }) => ({ id, name, mime_type, size, data_url })),
       id: makeId(),
       timestamp: Date.now(),
     };
@@ -326,11 +397,12 @@ export default function App() {
     ];
 
     setInput("");
+    setAttachments([]);
     setError("");
     setLoading(true);
     shouldAutoScrollRef.current = true;
 
-    updateCurrentMessages(chatId, startingMessages, question);
+    updateCurrentMessages(chatId, startingMessages, question || filesToSend[0]?.name || "File question");
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -344,9 +416,10 @@ export default function App() {
         signal: controller.signal,
         body: JSON.stringify({
           message: question,
+          attachments: filesToSend.map(({ name, mime_type, data }) => ({ name, mime_type, data })),
           user_id: userId,
           session_id: chatId,
-          session_name: titleFrom(question),
+          session_name: titleFrom(question || filesToSend[0]?.name || "File question"),
           history: previousMessages.map(({ role, content }) => ({
             role,
             content,
@@ -406,7 +479,7 @@ export default function App() {
             },
           ];
 
-          updateCurrentMessages(chatId, nextMessages, question);
+          updateCurrentMessages(chatId, nextMessages, question || filesToSend[0]?.name || "File question");
         }
       };
 
@@ -745,6 +818,18 @@ export default function App() {
                         : "assistant-bubble"
                     }`}
                   >
+                    {message.attachments?.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: message.content ? 8 : 0 }}>
+                        {message.attachments.map((file) => (
+                          <div key={file.id || file.name} style={{ maxWidth: 240, border: "1px solid var(--border-color, rgba(255,255,255,.18))", borderRadius: 12, padding: 8, fontSize: "0.82rem" }}>
+                            {file.mime_type?.startsWith("image/") && file.data_url ? (
+                              <img src={file.data_url} alt={file.name} style={{ display: "block", maxWidth: 200, maxHeight: 160, objectFit: "contain", borderRadius: 8, marginBottom: 5 }} />
+                            ) : <span aria-hidden="true">📎 </span>}
+                            <span style={{ overflowWrap: "anywhere" }}>{file.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {message.content ? (
                       <div
                         className={`message-text ${
@@ -806,6 +891,27 @@ export default function App() {
           )}
 
           <form className="composer" onSubmit={handleSubmit}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,.pdf,.txt,.md,.csv,.json,.py,.js,.html,.css,.docx,.pptx"
+              onChange={handleFileSelection}
+              style={{ display: "none" }}
+            />
+            {attachments.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "8px 12px 0" }}>
+                {attachments.map((file) => (
+                  <div key={file.id} style={{ display: "flex", alignItems: "center", gap: 8, borderRadius: 10, padding: "7px 10px", background: "rgba(150,120,180,.16)", maxWidth: "100%" }}>
+                    {file.mime_type.startsWith("image/") ? (
+                      <img src={file.data_url} alt={file.name} style={{ width: 42, height: 42, objectFit: "cover", borderRadius: 6 }} />
+                    ) : <span>📎</span>}
+                    <span style={{ fontSize: "0.8rem", overflowWrap: "anywhere" }}>{file.name}</span>
+                    <button type="button" onClick={() => removeAttachment(file.id)} aria-label={`Remove ${file.name}`} style={{ border: 0, background: "transparent", cursor: "pointer", fontSize: "1.1rem" }}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
             <textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
@@ -824,6 +930,16 @@ export default function App() {
             />
 
             <div className="composer-bottom">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading || attachments.length >= 5}
+                aria-label="Attach image or file"
+                title="Attach image or file"
+                style={{ border: "1px solid var(--border-color, rgba(255,255,255,.2))", borderRadius: 12, padding: "8px 11px", background: "transparent", color: "inherit", cursor: "pointer", opacity: loading || attachments.length >= 5 ? 0.5 : 1 }}
+              >
+                ＋ Attach
+              </button>
               <span className="composer-hint">
                 ♡ &nbsp; You're allowed to take your time.
               </span>
@@ -831,7 +947,7 @@ export default function App() {
               <button
                 className="send-button"
                 type="submit"
-                disabled={loading || !input.trim()}
+                disabled={loading || (!input.trim() && attachments.length === 0)}
                 aria-label="Send message"
               >
                 {loading ? (
